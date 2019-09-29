@@ -25,23 +25,23 @@ EOF
 
 upgrade_schema() {
   local \
-    current_version=$1 \
+    next_version=$(($1 + 1)) \
     dest_version=$2 \
-    version="" \
     upgrade_script=""
-  ls "${SCRIPTS_DIR}/upgrades" \
-    | sort -n \
-  | while read -r upgrade_script; do
-    version=$(echo "$upgrade_script" | cut -d . -f 1)
-    if [ "$version" -gt "$current_version" ] \
-      && [ "$version" -le "$dest_version" ]; then
-      echo "Upgrading to ${version}..."
-      set_version "$version"
-      "${SCRIPTS_DIR}/upgrades/${upgrade_script}" || {
-        echo "Upgrade failed. Schema might be corrupted!" >&2
+  while [ "$next_version" -le "$dest_version" ]; do
+    upgrade_script=$(ls "${SCRIPTS_DIR}/upgrades" \
+      | grep "^${next_version}" \
+      | head -n 1) || {
+        echo "Missing upgrade script for version ${next_version}!" >&2
         exit 1
       }
-    fi
+    echo "Upgrading to ${next_version}..."
+    set_version "$next_version"
+    "${SCRIPTS_DIR}/upgrades/${upgrade_script}" || {
+      echo "Upgrade failed. Schema might be corrupted!" >&2
+      exit 1
+    }
+    next_version=$(($next_version + 1))
   done
 }
 
@@ -51,19 +51,20 @@ downgrade_schema() {
     dest_version=$2 \
     version="" \
     downgrade_script=""
-  ls "${SCRIPTS_DIR}/downgrades" \
-    | sort -rn \
-  | while read -r downgrade_script; do
-    version=$(echo "$downgrade_script" | cut -d . -f 1)
-    if [ "$version" -le "$current_version" ] \
-      && [ "$version" -gt "$dest_version" ]; then
-      echo "Downgrading from ${version}..."
-      set_version "$(($version - 1))"
-      "${SCRIPTS_DIR}/downgrades/${downgrade_script}" || {
-        echo "Downgrade failed. Schema might be corrupted!" >&2
+  while [ "$current_version" -gt "$dest_version" ]; do
+    downgrade_script=$(ls "${SCRIPTS_DIR}/downgrades" \
+      | grep "^${current_version}" \
+      | head -n 1) || {
+        echo "Missing upgrade script for version ${current_version}!" >&2
         exit 1
       }
-    fi
+    echo "Downgrading from ${current_version}..."
+    current_version=$(($current_version - 1))
+    set_version "$current_version"
+    "${SCRIPTS_DIR}/upgrades/${downgrade_script}" || {
+      echo "Downgrade failed. Schema might be corrupted!" >&2
+      exit 1
+    }
   done
 }
 
@@ -85,7 +86,8 @@ main() {
   local \
     opt \
     OPTARG \
-    dest_version=""
+    dest_version="" \
+    show_version=""
   SCRIPTS_DIR=""
   trap on_exit EXIT
   while getopts ":hc:d:s:g" opt; do
@@ -100,8 +102,7 @@ main() {
       dest_version=$OPTARG
       ;;
     g)
-      echo "$(get_version)"
-      exit
+      show_version=1
       ;;
     h)
       print_help
@@ -117,6 +118,11 @@ main() {
     echo "Missing directory with scripts!" >&2
     exit 1
   }
+  export DB_MIGRATOR_DIR=$SCRIPTS_DIR
+  [ -n "$show_version" ] && {
+    echo "$(get_version)"
+    exit
+  }
   local current_version
   current_version=$(get_version) || {
     exit 1
@@ -127,7 +133,6 @@ main() {
       | head -n 1 \
       | cut -d . -f 1)
   fi
-  export DB_MIGRATOR_DIR=$SCRIPTS_DIR
   if [ -z "$dest_version" ]; then
     echo "No migrations detected"
   elif [ "$dest_version" -gt "$current_version" ]; then

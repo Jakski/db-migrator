@@ -50,10 +50,18 @@ main() {
   echo " OK"
 
   echo -n "* Do invalid downgrade..."
-  local exit_code
+  local exit_code=""
   rm -f test.db
   "$PROGRAM" -d tests >/dev/null
   "$PROGRAM" -d tests -s 1 >/dev/null 2>&1 || {
+    exit_code=$?
+  }
+  [ -z "$exit_code" ] && exit 1
+  echo " OK"
+
+  echo -n "* Do invalid upgrade..."
+  exit_code=""
+  "$PROGRAM" -d tests -s 3 >/dev/null 2>&1 || {
     exit_code=$?
   }
   [ -z "$exit_code" ] && exit 1

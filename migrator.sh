@@ -2,7 +2,7 @@
 ################################################################################
 # MIT License
 #
-# Copyright (c) 2019 Jakub Pieńkowski
+# Copyright (c) 2022 Jakub Pieńkowski
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -40,22 +40,27 @@
 #
 # Example configuration is available in source repository:
 #
-#   https://github.com/Jakski/db-migrator/tree/master/tests<Paste>
+#   https://github.com/Jakski/db-migrator/tree/master/tests
 ################################################################################
+#shellcheck disable=SC2128
+# SC2128: Expanding an array without an index only gives the first element.
 
-set -o errexit
-set -o pipefail
-set -o nounset
+set -eEuo pipefail
+shopt -s inherit_errexit nullglob lastpipe
 
-on_exit() {
-  local exit_code=$?
-  if [ "$exit_code" -ne 0 ]; then
-    echo "Aborting" >&2
-  fi
+on_error() {
+	declare \
+		cmd=$BASH_COMMAND \
+		exit_code=$?
+	if [ "$exit_code" != 0 ]; then
+		echo "Failing with exit code ${exit_code} at ${*} in command: ${cmd}" >&2
+	fi
+	exit "$exit_code"
 }
 
 print_help() {
-cat << EOF
+	declare -a output
+mapfile -d "" output << EOF
 Description:
   Dead simple tool for managing database schema migrations
 Options:
@@ -64,129 +69,160 @@ Options:
   -s VERSION  migrate to this schema version(latest by default)
   -g          display schema version
 EOF
+	echo -n "$output"
 }
 
 upgrade_schema() {
-  local \
-    next_version=$(($1 + 1)) \
-    dest_version=$2 \
-    upgrade_script=""
-  while [ "$next_version" -le "$dest_version" ]; do
-    upgrade_script=$(ls "${SCRIPTS_DIR}/upgrades" \
-      | grep "^${next_version}" \
-      | head -n 1) || {
-        echo "Missing upgrade script for version ${next_version}!" >&2
-        exit 1
-      }
-    echo "Upgrading to ${next_version}..."
-    set_version "$next_version"
-    "${SCRIPTS_DIR}/upgrades/${upgrade_script}" || {
-      echo "Upgrade failed. Schema might be corrupted!" >&2
-      exit 1
-    }
-    next_version=$(($next_version + 1))
-  done
+	declare \
+		next_version=$(("$1" + 1)) \
+		dest_version=$2 \
+		upgrade_script="" \
+		i
+	while [ "$next_version" -le "$dest_version" ]; do
+		for i in "${SCRIPTS_DIR}/upgrades/"*; do
+			if [[ ${i##*/} =~ ^${next_version} ]]; then
+				upgrade_script=$i
+				break
+			fi
+		done
+		if [ -z "$upgrade_script" ]; then
+			echo "Missing upgrade script for version ${next_version}!" >&2
+			return 1
+		fi
+		echo "Upgrading to ${next_version}..."
+		set_version "$next_version"
+		"$upgrade_script" || {
+			echo "Upgrade failed. Schema might be corrupted!" >&2
+			return 1
+		}
+		next_version=$(("$next_version" + 1))
+	done
 }
 
 downgrade_schema() {
-  local \
-    current_version=$1 \
-    dest_version=$2 \
-    version="" \
-    downgrade_script=""
-  while [ "$current_version" -gt "$dest_version" ]; do
-    downgrade_script=$(ls "${SCRIPTS_DIR}/downgrades" \
-      | grep "^${current_version}" \
-      | head -n 1) || {
-        echo "Missing upgrade script for version ${current_version}!" >&2
-        exit 1
-      }
-    echo "Downgrading from ${current_version}..."
-    current_version=$(($current_version - 1))
-    set_version "$current_version"
-    "${SCRIPTS_DIR}/upgrades/${downgrade_script}" || {
-      echo "Downgrade failed. Schema might be corrupted!" >&2
-      exit 1
-    }
-  done
+	declare \
+		current_version=$1 \
+		dest_version=$2 \
+		version="" \
+		downgrade_script="" \
+		i
+	while [ "$current_version" -gt "$dest_version" ]; do
+		for i in "${SCRIPTS_DIR}/downgrades/"*; do
+			if [[ ${i##*/} =~ ^${current_version} ]]; then
+				downgrade_script=$i
+				break
+			fi
+		done
+		if [ -z "$downgrade_script" ]; then
+			echo "Missing upgrade script for version ${current_version}!" >&2
+			return 1
+		fi
+		echo "Downgrading from ${current_version}..."
+		current_version=$(("$current_version" - 1))
+		set_version "$current_version"
+		"$downgrade_script" || {
+			echo "Downgrade failed. Schema might be corrupted!" >&2
+			return 1
+		}
+	done
 }
 
 set_version() {
-  local \
-    version=$1 \
-    version_script
-  version_script=$(ls "$SCRIPTS_DIR" | grep ^set_version | head -n 1)
-  "${SCRIPTS_DIR}/${version_script}" "$version"
+	declare \
+		version=$1 \
+		version_script="" \
+		i
+	for i in "${SCRIPTS_DIR}/"*; do
+		if [[ ${i##*/} =~ ^set_version ]]; then
+			version_script=$i
+			break
+		fi
+	done
+	if [ -z "$version_script" ]; then
+		echo "Couldn't find set_version script!" >&2
+		return 1
+	fi
+	"$version_script" "$version"
 }
 
 get_version() {
-  local version_script
-  version_script=$(ls "$SCRIPTS_DIR" | grep ^get_version | head -n 1)
-  "${SCRIPTS_DIR}/${version_script}"
+	declare \
+		version_script="" \
+		i
+	for i in "${SCRIPTS_DIR}/"*; do
+		if [[ ${i##*/} =~ ^get_version ]]; then
+			version_script=$i
+			break
+		fi
+	done
+	if [ -z "$version_script" ]; then
+		echo "Couldn't find get_version script!" >&2
+		return 1
+	fi
+	"$version_script"
 }
 
 main() {
-  local \
-    opt \
-    OPTARG \
-    dest_version="" \
-    show_version=""
-  SCRIPTS_DIR=""
-  trap on_exit EXIT
-  while getopts ":hc:d:s:g" opt; do
-    case "$opt" in
-    d)
-      SCRIPTS_DIR=$(realpath "$OPTARG")
-      ;;
-    c)
-      script_cmd=$OPTARG
-      ;;
-    s)
-      dest_version=$OPTARG
-      ;;
-    g)
-      show_version=1
-      ;;
-    h)
-      print_help
-      exit
-      ;;
-    *)
-      print_help
-      exit 1
-      ;;
-    esac
-  done
-  [ -z "$SCRIPTS_DIR" ] && {
-    echo "Missing directory with scripts!" >&2
-    exit 1
-  }
-  export DB_MIGRATOR_DIR=$SCRIPTS_DIR
-  [ -n "$show_version" ] && {
-    echo "$(get_version)"
-    exit
-  }
-  local current_version
-  current_version=$(get_version) || {
-    exit 1
-  }
-  if [ -z "$dest_version" ]; then
-    dest_version=$(ls "${SCRIPTS_DIR}/upgrades" \
-      | sort -rn \
-      | head -n 1 \
-      | cut -d . -f 1)
-  fi
-  if [ -z "$dest_version" ]; then
-    echo "No migrations detected"
-  elif [ "$dest_version" -gt "$current_version" ]; then
-    upgrade_schema "$current_version" "$dest_version"
-    echo "Current schema version is $(get_version)"
-  elif [ "$dest_version" -lt "$current_version" ]; then
-    downgrade_schema "$current_version" "$dest_version"
-    echo "Current schema version is $(get_version)"
-  else
-    echo "Schema version is up-to-date"
-  fi
+	trap 'on_error "${BASH_SOURCE[0]}:${LINENO}"' ERR
+	declare \
+		opt \
+		OPTARG \
+		dest_version="" \
+		show_version=""
+	SCRIPTS_DIR=""
+	while getopts ":hd:s:g" opt; do
+		case "$opt" in
+		d)
+			SCRIPTS_DIR=$(realpath "$OPTARG")
+			;;
+		s)
+			dest_version=$OPTARG
+			;;
+		g)
+			show_version=1
+			;;
+		h)
+			print_help
+			exit
+			;;
+		*)
+			print_help
+			exit 1
+			;;
+		esac
+	done
+	[ -z "$SCRIPTS_DIR" ] && {
+		echo "Missing directory with scripts!" >&2
+		exit 1
+	}
+	export DB_MIGRATOR_DIR=$SCRIPTS_DIR
+	[ -n "$show_version" ] && {
+		get_version
+		exit
+	}
+	declare current_version
+	current_version=$(get_version) || {
+		exit 1
+	}
+	if [ -z "$dest_version" ]; then
+		# SC2012: Use find instead of ls to better handle non-alphanumeric filenames.
+		# shellcheck disable=SC2012
+		dest_version=$(ls "${SCRIPTS_DIR}/upgrades" |
+			sort -rn |
+			head -n 1 |
+			cut -d . -f 1)
+	fi
+	if [ -z "$dest_version" ]; then
+		echo "No migrations detected"
+	elif [ "$dest_version" -gt "$current_version" ]; then
+		upgrade_schema "$current_version" "$dest_version"
+		echo "Current schema version is $(get_version)"
+	elif [ "$dest_version" -lt "$current_version" ]; then
+		downgrade_schema "$current_version" "$dest_version"
+		echo "Current schema version is $(get_version)"
+	else
+		echo "Schema version is up-to-date"
+	fi
 }
 
 main "$@"
